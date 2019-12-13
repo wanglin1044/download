@@ -16,6 +16,9 @@ class DownloadTask {
     this.count = 0
     this.audioUrl = ''
     this.videoUrl = ''
+    this.videoSize = 0
+    this.audioSize = 0
+    this.state = 'downloadFail'
     this.audioTmpFile = './video/atmp' + num + '.m4s'
     this.videoTmpFile = './video/vtmp' + num + '.m4s'
     num++
@@ -25,24 +28,28 @@ class DownloadTask {
   log() {
     let logJosn = fs.readFileSync('./log/log.json', 'utf-8')
     logJosn = JSON.parse(logJosn)
-    if (logJosn.taskList) {
-      let task = {
-        code: this.code,
-        num: this.num,
-        filename: this.filename,
-        time: new Date().toLocaleString()
-      }
-      logJosn.taskList.push(task)
-    } else {
+    if (!logJosn.taskList) {
       logJosn.taskList = []
-      let task = {
-        code: this.code,
-        num: this.num,
-        filename: this.filename,
-        time: new Date().toLocaleString()
-      }
-      logJosn.taskList.push(task)
     }
+    let flag = 0
+    logJosn.taskList.map(item => {
+        if (item.code === this.code) {
+            flag = 1
+        }
+    })
+    let task = {
+        state: this.state,
+        filename: this.filename
+    }
+    if (flag) {
+        task.changeTime = new Date().toLocaleString()
+    } else {
+        task.code = this.code
+        task.code = this.code
+        task.num = this.num
+        task.time = new Date().toLocaleString()
+    }
+    logJosn.taskList.push(task)
     fs.writeFileSync('./log/log.json', JSON.stringify(logJosn))
   }
   startTask() {
@@ -89,9 +96,11 @@ class DownloadTask {
                   this.audioUrl = audio[0].baseUrl
                   var video = dash.video
                   this.videoUrl = video[0].baseUrl
-                  console.log(`获取 ${this.code} 链接成功,开始下载`)
-                  this.downloadMedia('video', this.videoTmpFile, this.videoUrl)
-                  this.downloadMedia('audio', this.audioTmpFile, this.audioUrl)
+                  this.getFileSize('video', this.videoTmpFile, this.videoUrl)
+                  this.getFileSize('audio', this.audioTmpFile, this.audioUrl)
+                //   console.log(`获取 ${this.code} 链接成功,开始下载`)
+                //   this.downloadMedia('video', this.videoTmpFile, this.videoUrl)
+                //   this.downloadMedia('audio', this.audioTmpFile, this.audioUrl)
                 }
               }
             }
@@ -102,7 +111,27 @@ class DownloadTask {
       })
     })
   }
-  downloadMedia(type, tmpFilename, mediaUrl) {
+  getFileSize(type, tmpFilename, fileUrl) {
+    var options = {
+        headers: {
+            'Origin': 'https://www.bilibili.com',
+            'Referer': `https://www.bilibili.com/video/${this.code}`,
+            'Sec-Fetch-Mode': 'cors',
+            'Range': 'bytes=976-1163',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/76.0.3809.132 Safari/537.36'
+          }
+    }
+    http.get(fileUrl, options, res => {
+        let maxRange = res.headers['content-range']
+        let size = maxRange.match(/\/([\d]+)$/)[1]
+        console.log(this.code + '的' + type==='video'?'视频':'音频' + '的大小：' + (size / 1024 / 1024).toFixed(3) + 'm')
+        this[type + 'Size'] = size
+        res.resume();
+        this.downloadMedia(type, tmpFilename, fileUrl, size)
+        return
+    })
+  }
+  downloadMedia(type, tmpFilename, mediaUrl, size) {
     var writeStream = fs.createWriteStream(tmpFilename)
     console.time(type + this.num)
     var readStream = request.get(mediaUrl, {
@@ -110,7 +139,7 @@ class DownloadTask {
         'Origin': 'https://www.bilibili.com',
         'Referer': `https://www.bilibili.com/video/${this.code}`,
         'Sec-Fetch-Mode': 'cors',
-        'Range': 'bytes=0-999999999',
+        'Range': 'bytes=0-' + size,
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/76.0.3809.132 Safari/537.36'
       }
     })
@@ -118,12 +147,14 @@ class DownloadTask {
       console.log((type === 'video' ? '视频' : '音频') + '下载成功')
     });
     readStream.on('error', err => {
+      this.state = 'downloadFail'
       this.handleError(err)
     })
     writeStream.on('finish', () => {
       console.timeEnd(type + this.num)
       if (++this.count===2) {
         console.log(this.code + '开始合并')
+        this.state = 'downloadSuccess'
         this.concatFile()
       }
       writeStream.end()
@@ -132,9 +163,13 @@ class DownloadTask {
   }
   concatFile() {
     child.exec(`ffmpeg -i ${this.audioTmpFile} -i ${this.videoTmpFile} -c copy video/${this.filename}.mp4`, err => {
-      if (err) this.handleError(error)
+      if (err) {
+        this.state = 'concatFail'
+        this.handleError(error)
+      }
       else {
         console.log(this.code + '合并成功, 开始删除临时文件')
+        this.state = 'concatSuccess'
         this.deleteTmpFile(this.videoTmpFile, this.audioTmpFile)
       }
     })
@@ -144,7 +179,9 @@ class DownloadTask {
     if (fs.existsSync(videoTmpFile)) {
       fs.unlinkSync(videoTmpFile)
       console.log(this.code + '删除临时视频文件成功')
+      this.state = 'deleteVideoTmpSuccess'
     } else {
+      this.state = 'deleteVideoTmpFail'
       this.handleError({
         type: 'delete tmp file',
         message: this.code + '删除临时视频文件失败'
@@ -153,7 +190,10 @@ class DownloadTask {
     if (fs.existsSync(audioTmpFile)) {
       fs.unlinkSync(audioTmpFile)
       console.log(this.code + '删除临时音频文件成功');
+      this.state = 'finish'
+      this.log()
     } else {
+      this.state = 'deleteAudioTmpFail'
       this.handleError({
         type: 'delete tmp file',
         message: this.code + '删除临时音频文件失败'
@@ -161,7 +201,8 @@ class DownloadTask {
     }
   }
   handleError(error) {
-    console.log(error.message)
+    console.log(error)
+    this.log()
   }
 }
 
@@ -189,7 +230,23 @@ function handleDownloadRequest(res, tmpUrl) {
   if (code.indexOf('av') != 0) {
     writeEnd(res, { msg: 'code参数错误' })
   } else {
-    var filename = url.parse(tmpUrl, true).query.filename;
+    let logJosn = fs.readFileSync('./log/log.json', 'utf-8')
+    logJosn = JSON.parse(logJosn)
+    let flag = 0
+    if (logJosn.taskList) {
+        logJosn.taskList.map(item => {
+            if (item.code === code) {
+                flag = 1
+                if (item.state === 'finish') {
+                    writeEnd(res, { msg: code + '已经下载过了' })
+                } else {
+                    writeEnd(res, { msg: '请手动删除临时文件并重新下载' })
+                }
+            }
+        })
+    }
+    if (flag) return
+    var filename = url.parse(tmpUrl, true).query.filename
     if (!filename) filename = code
     filename.replace(/[\s]/g, '')
     if (fs.existsSync(`video/${filename}.mp4`)) {
